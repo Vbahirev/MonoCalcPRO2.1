@@ -1,0 +1,140 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ========= HELPERS ========= */
+    function isSignedIn() { return request.auth != null; }
+
+    // Absolute superadmin (by UID) — never depends on user profile
+    function isSuperAdmin() {
+      return isSignedIn()
+        && (
+          request.auth.uid == "sGGQraRarlZAtRJKgMA26TB75MN2"
+          || request.auth.token.email == "viktor19971997@gmail.com"
+        );
+    }
+
+    // Safe self-profile getter (relies on /users/{uid} self-read rule below)
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function hasUserDoc() { return isSignedIn() && userDoc().exists(); }
+
+    function userRole() { return hasUserDoc() ? userDoc().data.role : null; }
+
+    function isAdminOrSuper() {
+      return isSignedIn() && userRole() in ['admin', 'superadmin'];
+    }
+
+    function hasPerm(perm) {
+      return hasUserDoc()
+        && (userDoc().data.permissions[perm] == true);
+    }
+
+    /* ================================
+       1. ГЛОБАЛЬНЫЕ НАСТРОЙКИ + ЛАЗЕР
+       ================================ */
+    match /settings/{docId} {
+      allow read: if true;
+
+      // IMPORTANT: allow superadmin even if user profile role is wrong/missing
+      allow write: if isSuperAdmin()
+                   || isAdminOrSuper()
+                   || hasPerm('settings.global.write')
+                   || hasPerm('settings.laser.write');
+    }
+
+    /* ================================
+       2. ИСТОРИЯ ПОЛЬЗОВАТЕЛЯ
+       ================================ */
+    match /users/{userId}/history/{docId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    /* ================================
+       3. 🗑 ГЛОБАЛЬНЫЙ АРХИВ (АДМИНСКИЙ)
+       ================================ */
+    match /trash/{trashId} {
+      allow read: if isSuperAdmin()
+                  || isAdminOrSuper()
+                  || hasPerm('trash.view');
+
+      allow create: if isSuperAdmin()
+                    || isAdminOrSuper()
+                    || hasPerm('settings.global.write')
+                    || hasPerm('settings.laser.write');
+
+      allow delete: if isSuperAdmin()
+                    || hasPerm('trash.purge');
+
+      allow update: if false; // immutable
+    }
+
+    /* ================================
+       4. 🗂 ПОЛЬЗОВАТЕЛЬСКИЙ АРХИВ
+       ================================ */
+    match /users/{userId}/trash/{docId} {
+      allow read, create, delete: if isSignedIn() && request.auth.uid == userId;
+      allow update: if false; // immutable
+    }
+
+    /* ================================
+       5. ПРОФИЛИ ПОЛЬЗОВАТЕЛЕЙ (КАНБАН)
+       ================================ */
+    match /users/{userId} {
+      // ✅ CRITICAL: allow self-read without role checks (breaks recursion for userDoc())
+      allow read: if isSignedIn() && request.auth.uid == userId;
+
+      // admin/superadmin can read everyone (after recursion is broken)
+      allow read: if isSuperAdmin()
+                  || isAdminOrSuper()
+                  || hasPerm('users.list.view');
+
+      // self bootstrap profile (first login): only guest + empty permissions
+      allow create: if isSignedIn()
+                    && request.auth.uid == userId
+                    && request.resource.data.keys().hasOnly([
+                      'email',
+                      'displayName',
+                      'photoURL',
+                      'providerId',
+                      'role',
+                      'permissions',
+                      'createdAt',
+                      'lastLoginAt'
+                    ])
+                    && request.resource.data.role == 'guest'
+                    && request.resource.data.permissions is map
+                    && request.resource.data.permissions.keys().size() == 0;
+
+      // superadmin only (or explicit perm) can write/delete others
+      allow write, delete: if isSuperAdmin()
+                           || hasPerm('users.permissions.edit');
+
+      // self update allowed, but cannot touch role/permissions
+      allow update: if isSignedIn()
+                    && request.auth.uid == userId
+                    && !request.resource.data
+                       .diff(resource.data)
+                       .affectedKeys()
+                       .hasAny(['role', 'permissions']);
+    }
+
+    /* ================================
+       6. AUDIT LOGS (STEP 5)
+       ================================ */
+    match /audit_logs/{logId} {
+      // Super Admin only — under any circumstances
+      allow read, write: if isSuperAdmin();
+    }
+
+    /* ================================
+       7. ЗАПРЕТ НА ВСЁ ОСТАЛЬНОЕ
+       ================================ */
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
