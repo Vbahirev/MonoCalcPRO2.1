@@ -761,7 +761,12 @@ const saveFullDatabase = async () => {
             });
 
             // ⚠️ НЕ УДАЛЯТЬ: фиксируем событие для плавного вытеснения (~30 дней)
-            await writeGarbage(uid, { action: 'history_delete', historyId: id });
+            // Не должно блокировать удаление истории, если правила для garbage не выданы.
+            try {
+                await writeGarbage(uid, { action: 'history_delete', historyId: id });
+            } catch (garbageErr) {
+                console.warn('[GARBAGE] write skipped:', garbageErr?.code || garbageErr?.message || garbageErr);
+            }
             await deleteDoc(fromRef);
             return { status: 'success', message: 'Проект перемещен в корзину' };
         } catch (e) {

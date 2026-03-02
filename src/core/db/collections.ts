@@ -20,4 +20,4 @@ export const globalConfigDoc = () => doc(db, 'settings', 'global_config')
 
 // Optional: daily garbage ring-buffer (30 slots)
 export const garbageSlotDoc = (uid: string, slotId: string | number) =>
-  doc(db, 'users', uid, 'garbage', 'slots', String(slotId))
+  doc(db, 'users', uid, 'garbage', String(slotId))
