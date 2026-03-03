@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useCalculator } from '@/core/useCalculator';
 import { useDatabase } from '@/composables/useDatabase'; // <--- Импортируем базу
@@ -40,11 +40,11 @@ const {
 const showSaveProjectModal = ref(false);
 const showResetConfirm = ref(false);
 const showInvoice = ref(false);
+const productQty = ref(1);
 const showAuthModal = ref(false); // <--- Для окна входа
 const isManualSaving = ref(false);
 const activeTab = ref('layers');
 const toast = ref({ show: false, message: '' });
-const reviewedSections = ref({ processing: false, accessories: false, packaging: false, design: false });
 
 // Используем права для скрытия кнопок
 const canViewHistory = computed(() => hasPermission('canSaveHistory'));
@@ -65,43 +65,14 @@ const totalMaterialSheets = computed(() =>
     matConsumption.value.reduce((sum, item) => sum + (Number(item?.sheets) || 0), 0)
 );
 
-const checklist = computed(() => {
-    const hasLayers = layers.value.length > 0;
-    const allMaterials = hasLayers && layers.value.every(layer => !!layer?.matId);
-    const allSizes = hasLayers && layers.value.every(layer => (Number(layer?.w) > 0 && Number(layer?.h) > 0));
-    const allCutAndQty = hasLayers && layers.value.every(layer => (Number(layer?.cut) > 0 && Number(layer?.qty) >= 1));
-    const extrasReviewed = Object.values(reviewedSections.value).every(Boolean);
-
-    return [
-        { key: 'layers', label: 'Добавлен хотя бы один слой', done: hasLayers, required: true },
-        { key: 'material', label: 'Во всех слоях выбран материал', done: allMaterials, required: true },
-        { key: 'size', label: 'Во всех слоях заполнены размеры', done: allSizes, required: true },
-        { key: 'cutqty', label: 'Указаны длина реза и количество', done: allCutAndQty, required: true },
-        { key: 'extras', label: 'Проверены доп. разделы (пост-обработка, аксессуары, упаковка, дизайн)', done: extrasReviewed, required: true }
-    ];
-});
-
-const checklistDoneCount = computed(() => checklist.value.filter(item => item.done).length);
-const missingChecklist = computed(() => checklist.value.filter(item => !item.done));
-const isChecklistComplete = computed(() => missingChecklist.value.length === 0);
-
-const checklistLabelShort = (key, full) => {
-    if (key === 'layers') return 'Слой';
-    if (key === 'material') return 'Материал';
-    if (key === 'size') return 'Размеры';
-    if (key === 'cutqty') return 'Рез/кол-во';
-    if (key === 'extras') return 'Доп. разделы';
-    return full;
-};
 
 onMounted(() => {
     init();
+    document.addEventListener('focusin', handleNumberFocusIn);
 });
 
-watch(activeTab, (tab) => {
-    if (Object.prototype.hasOwnProperty.call(reviewedSections.value, tab)) {
-        reviewedSections.value[tab] = true;
-    }
+onUnmounted(() => {
+    document.removeEventListener('focusin', handleNumberFocusIn);
 });
 
 const statusConfig = computed(() => {
@@ -192,33 +163,91 @@ const stepUp = (obj, key, step = 1) => { let val = parseFloat(obj[key]) || 0; ob
 const stepDown = (obj, key, step = 1, min = 0) => { let val = parseFloat(obj[key]) || 0; let newVal = parseFloat((val - step).toFixed(1)); obj[key] = newVal < min ? min : newVal; if(key === 'w' || key === 'h') autoCalcArea(obj); };
 const changeDiscount = (step) => { let n = project.value.discount + step; project.value.discount = Math.max(0, Math.min(50, n)); };
 const changeMarkup = (step) => { let n = project.value.markup + step; project.value.markup = Math.max(0, Math.min(50, n)); };
+const escapeRegExp = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const normalizeCopyBaseName = (name = '') => {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return `Деталь ${layers.value.length + 1}`;
+    return trimmed.replace(/\s*\(копия(?:\s+\d+)?\)$/i, '').trim() || `Деталь ${layers.value.length + 1}`;
+};
+const buildNextCopyName = (sourceName) => {
+    const base = normalizeCopyBaseName(sourceName);
+    const pattern = new RegExp(`^${escapeRegExp(base)}\\s*\\(копия(?:\\s+(\\d+))?\\)$`, 'i');
 
-const ensureChecklistComplete = (actionLabel) => {
-    if (isChecklistComplete.value) return true;
+    let maxCopyIndex = 0;
+    (layers.value || []).forEach(layerItem => {
+        const currentName = String(layerItem?.name || '').trim();
+        const match = currentName.match(pattern);
+        if (match) {
+            const copyIndex = match[1] ? Number(match[1]) : 1;
+            if (Number.isFinite(copyIndex)) maxCopyIndex = Math.max(maxCopyIndex, copyIndex);
+        }
+    });
 
-    const firstMissing = missingChecklist.value[0];
-    if (firstMissing?.key === 'extras') {
-        activeTab.value = 'processing';
-    } else {
-        activeTab.value = 'layers';
-    }
-
-    toast.value = {
-        show: true,
-        message: `Перед действием "${actionLabel}" заполните: ${firstMissing?.label || 'обязательные поля'}`
-    };
-    setTimeout(() => { toast.value.show = false; }, 3500);
-    return false;
+    const nextIndex = maxCopyIndex + 1;
+    return nextIndex === 1 ? `${base} (копия)` : `${base} (копия ${nextIndex})`;
 };
 
+const duplicateLayer = (layer) => {
+    if (!layer) return;
+    layers.value.forEach(item => { item.expanded = false; });
+    const copiedLayer = {
+        ...layer,
+        id: Date.now() + Math.random(),
+        name: buildNextCopyName(layer.name),
+        expanded: true
+    };
+    layers.value.unshift(copiedLayer);
+};
+
+const moveCaretToEnd = (event) => {
+    const target = event?.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    requestAnimationFrame(() => {
+        const len = target.value?.length ?? 0;
+        try { target.setSelectionRange(len, len); } catch (e) {}
+    });
+};
+
+const handleNumberFocusIn = (event) => {
+    const target = event?.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.type !== 'number') return;
+    if (!target.closest('.desktop-calc')) return;
+    moveCaretToEnd(event);
+};
+
+const changeProductQty = (step) => {
+    const next = Number(productQty.value || 1) + step;
+    productQty.value = Math.max(1, Math.floor(next));
+};
+
+const toMoneyNum = (value) => {
+    if (typeof value === 'string') {
+        const normalized = value.replace(/\s+/g, '').replace(',', '.');
+        const parsed = Number(normalized);
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const pricePerOne = computed(() => Math.round(toMoneyNum(totals.value?.total)));
+const totalForAll = computed(() => Math.round(pricePerOne.value * Number(productQty.value || 1)));
+
+watch(productQty, (val) => {
+    const n = Number(val);
+    if (!Number.isFinite(n) || n < 1) {
+        productQty.value = 1;
+        return;
+    }
+    productQty.value = Math.floor(n);
+});
+
 const openInvoiceModal = () => {
-    if (!ensureChecklistComplete('Сформировать КП')) return;
     showInvoice.value = true;
 };
 
 const copyQuote = async () => {
-    if (!ensureChecklistComplete('Копировать КП')) return;
-
     // Автосохранение при копировании, если есть права
     if (canViewHistory.value) { triggerAutoSave().then(saved => { toast.value = { show: true, message: saved ? 'Скопировано и сохранено' : 'Скопировано' }; setTimeout(() => { toast.value.show = false; }, 3000); }); } 
     else { toast.value = { show: true, message: 'Скопировано' }; setTimeout(() => { toast.value.show = false; }, 3000); }
@@ -226,13 +255,14 @@ const copyQuote = async () => {
     const date = new Date().toLocaleDateString('ru-RU');
     let t = `КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ\nДата: ${date}\n\n`;
     if(project.value.name) t += `Проект: ${project.value.name}\n`;
-    t += `ИТОГО К ОПЛАТЕ: ${totals.value.total.toLocaleString()} ₽`;
+    t += `Количество изделий: ${productQty.value}\n`;
+    t += `ИТОГО К ОПЛАТЕ: ${totalForAll.value.toLocaleString()} ₽`;
     navigator.clipboard.writeText(t);
 };
 
 const onInvoicePrint = () => { if(canViewHistory.value) triggerAutoSave(); };
 const requestReset = () => { showResetConfirm.value = true; };
-const confirmReset = () => { resetAll(); showResetConfirm.value = false; toast.value = { show: true, message: 'Проект очищен' }; setTimeout(() => { toast.value.show = false; }, 3000); };
+const confirmReset = () => { resetAll(); productQty.value = 1; showResetConfirm.value = false; toast.value = { show: true, message: 'Проект очищен' }; setTimeout(() => { toast.value.show = false; }, 3000); };
 </script>
 
 <template>
@@ -291,26 +321,6 @@ const confirmReset = () => { resetAll(); showResetConfirm.value = false; toast.v
         </div>
     </header>
 
-    <div class="calc-checklist mb-4 p-3 rounded-2xl border border-gray-200 dark:border-white/10 bg-white dark:bg-[#1C1C1E] no-print">
-        <div class="flex items-center justify-between gap-3 mb-2">
-            <h3 class="text-[10px] font-black uppercase tracking-wider text-[#18181B] dark:text-white">Чеклист менеджера</h3>
-            <div class="text-[10px] font-black whitespace-nowrap" :class="isChecklistComplete ? 'text-black dark:text-white' : 'text-gray-500 dark:text-gray-300'">
-                {{ checklistDoneCount }}/{{ checklist.length }}
-            </div>
-        </div>
-
-        <div class="flex flex-wrap gap-1.5">
-            <div v-for="item in checklist" :key="item.key" class="check-item rounded-full pl-2 pr-2.5 py-1 border transition-colors" :class="item.done ? 'border-gray-300 bg-gray-100 dark:border-white/25 dark:bg-white/10' : 'border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-white/5'">
-                <div class="flex items-center gap-1.5">
-                    <span class="w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-black" :class="item.done ? 'bg-black text-white dark:bg-white dark:text-black' : 'bg-gray-300 text-white dark:bg-gray-600'">
-                        {{ item.done ? '✓' : '' }}
-                    </span>
-                    <span class="text-[10px] font-bold" :class="item.done ? 'text-[#18181B] dark:text-white' : 'text-gray-600 dark:text-gray-300'">{{ checklistLabelShort(item.key, item.label) }}</span>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <div class="flex overflow-x-auto gap-1.5 mb-6 p-1.5 bg-gray-100 dark:bg-white/5 rounded-2xl no-print">
         <button v-for="(name, key) in {'layers':'1. Раскрой', 'processing':'2. Пост-обработка', 'accessories':'3. Аксессуары', 'packaging':'4. Упаковка', 'design':'5. Дизайн'}" 
             :key="key" @click="activeTab = key"
@@ -355,8 +365,8 @@ const confirmReset = () => { resetAll(); showResetConfirm.value = false; toast.v
                         <div v-if="layers.length" key="list" class="space-y-4">
                                 <div v-for="(l, i) in layers" :key="l.id" class="card layer-card relative group w-full min-w-0 transition-colors duration-300 !p-0" :class="l.expanded ? 'bg-white' : 'bg-white hover:bg-[#18181B] border border-gray-200 hover:border-black'">
                                     <div @click="l.expanded = !l.expanded" class="layer-header flex justify-between items-center select-none cursor-pointer transition-colors duration-200 p-4" :class="{ 'is-expanded': l.expanded }">
-                                        <div class="flex items-center gap-3 flex-1 min-w-0"><div class="shrink-0 transition-transform duration-300" :class="[l.expanded ? 'rotate-180 text-gray-400' : 'text-black group-hover:text-white']"><svg width="10" height="6" viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 1L5 5L9 1"/></svg></div><input v-model="l.name" @click.stop maxlength="15" class="bg-transparent outline-none font-bold text-sm uppercase tracking-widest transition-colors w-[30%] cursor-text" :class="l.expanded ? 'text-black' : 'text-black group-hover:text-white'" placeholder="Название слоя"></div>
-                                        <div class="shrink-0 ml-4"><button v-if="l.expanded" @click.stop="removeLayer(l.id)" class="text-gray-300 hover:text-red-500 font-bold text-xs no-print transition-colors">Удалить</button></div>
+                                        <div class="flex items-center gap-3 flex-1 min-w-0"><div class="shrink-0 transition-transform duration-300" :class="[l.expanded ? 'rotate-180 text-gray-400' : 'text-black group-hover:text-white']"><svg width="10" height="6" viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 1L5 5L9 1"/></svg></div><input v-model="l.name" @click.stop maxlength="40" class="bg-transparent outline-none font-bold text-sm uppercase tracking-widest transition-colors w-full min-w-0 cursor-text" :class="l.expanded ? 'text-black' : 'text-black group-hover:text-white'" placeholder="Название слоя"></div>
+                                        <div class="shrink-0 ml-4 flex items-center gap-3"><button v-if="l.expanded" @click.stop="duplicateLayer(l)" class="text-gray-300 hover:text-black dark:hover:text-white font-bold text-xs no-print transition-colors">Копировать</button><button v-if="l.expanded" @click.stop="removeLayer(l.id)" class="text-gray-300 hover:text-red-500 font-bold text-xs no-print transition-colors">Удалить</button></div>
                                     </div>
                                     <transition name="collapse" @before-enter="onBeforeEnter" @enter="onEnter" @after-enter="onAfterEnter" @before-leave="onBeforeLeave" @leave="onLeave">
                                         <div v-show="l.expanded" class="layer-card-body px-5 pb-5 pt-3 grid grid-cols-1 md:grid-cols-12 gap-x-4 gap-y-4">
@@ -432,9 +442,12 @@ const confirmReset = () => { resetAll(); showResetConfirm.value = false; toast.v
                          <div class="absolute top-2 right-2 z-10"><Tooltip text="Итого = (Себестоимость + Наценка%) - Скидка%" width="w-48"><div class="w-4 h-4 rounded-full bg-white text-gray-400 hover:text-black flex items-center justify-center text-[10px] font-bold shadow-sm cursor-help">?</div></Tooltip></div>
                         <div class="flex items-center justify-between"><div class="flex flex-col"><span class="text-[10px] uppercase font-bold text-gray-500">Наценка</span><span v-if="totals.markupRub > 0" class="text-[10px] font-bold text-green-600">+{{ totals.markupRub.toLocaleString() }} ₽</span></div><div class="flex items-center bg-white rounded-lg border border-gray-200 h-8 shadow-sm"><button @click="changeMarkup(-5)" class="w-8 h-full flex items-center justify-center text-gray-400 hover:text-black hover:bg-gray-50 rounded-l-lg transition-colors font-bold">-</button><span class="kp-percent-value w-10 text-center text-xs font-bold border-x border-gray-100 leading-8">{{ project.markup }}%</span><button @click="changeMarkup(5)" class="w-8 h-full flex items-center justify-center text-gray-400 hover:text-black hover:bg-gray-50 rounded-r-lg transition-colors font-bold">+</button></div></div>
                         <div class="flex items-center justify-between"><div class="flex flex-col"><span class="text-[10px] uppercase font-bold text-gray-500">Скидка</span><span v-if="totals.discountRub > 0" class="text-[10px] font-bold text-red-500">-{{ totals.discountRub.toLocaleString() }} ₽</span></div><div class="flex items-center bg-white rounded-lg border border-gray-200 h-8 shadow-sm"><button @click="changeDiscount(-5)" class="w-8 h-full flex items-center justify-center text-gray-400 hover:text-black hover:bg-gray-50 rounded-l-lg transition-colors font-bold">-</button><span class="kp-percent-value w-10 text-center text-xs font-bold border-x border-gray-100 leading-8">{{ project.discount }}%</span><button @click="changeDiscount(5)" class="w-8 h-full flex items-center justify-center text-gray-400 hover:text-black hover:bg-gray-50 rounded-r-lg transition-colors font-bold">+</button></div></div>
+                        <div class="pt-3 mt-1 border-t border-gray-200">
+                            <div class="flex items-center justify-between"><div class="flex flex-col"><span class="text-[10px] uppercase font-bold text-gray-500">Количество изделий</span><span class="text-[10px] font-bold text-gray-500">{{ productQty }} шт</span></div><div class="flex items-center bg-white rounded-lg border border-gray-200 h-8 shadow-sm"><button @click="changeProductQty(-1)" class="w-8 h-full flex items-center justify-center text-gray-400 hover:text-black hover:bg-gray-50 rounded-l-lg transition-colors font-bold">-</button><input type="number" min="1" v-model.number="productQty" @focus="moveCaretToEnd" class="w-12 h-full text-center text-xs font-bold border-x border-gray-100 bg-transparent outline-none" /><button @click="changeProductQty(1)" class="w-8 h-full flex items-center justify-center text-gray-400 hover:text-black hover:bg-gray-50 rounded-r-lg transition-colors font-bold">+</button></div></div>
+                        </div>
                     </div>
 
-                    <div class="mb-6 border-t border-gray-100 pt-4"><div class="flex justify-between items-baseline"><span class="text-sm font-bold uppercase tracking-widest text-gray-400">Итого</span><span class="total-amount text-3xl font-black tracking-tighter">{{ totals.total.toLocaleString() }} ₽</span></div></div>
+                    <div class="mb-6 border-t border-gray-100 pt-4"><div class="flex justify-between items-baseline"><span class="text-sm font-bold uppercase tracking-widest text-gray-400">Итого</span><span class="total-amount text-3xl font-black tracking-tighter">{{ totalForAll.toLocaleString() }} ₽</span></div><div class="flex justify-end mt-1"><span class="text-[10px] font-bold text-gray-400">{{ pricePerOne.toLocaleString() }} ₽ × {{ productQty }} шт</span></div></div>
 
                     <div class="flex flex-col gap-3">
                         <button @click="openInvoiceModal" class="w-full h-12 bg-black text-white rounded-xl font-bold uppercase text-xs tracking-widest hover:bg-gray-800 transition-all active:scale-[0.98] shadow-xl flex items-center justify-center gap-2">Сформировать КП</button>
@@ -456,7 +469,7 @@ const confirmReset = () => { resetAll(); showResetConfirm.value = false; toast.v
     </Transition>
 
     <Teleport to="body">
-        <InvoiceModal :show="showInvoice" :project="project" :layers="layers" :processing="processing" :accessories="accessories" :packaging="packaging" :design="design" :totals="totals" :settings="settings" :materials="materials" :coatings="coatings" @close="showInvoice = false" @print="onInvoicePrint" />
+        <InvoiceModal :show="showInvoice" :project="project" :layers="layers" :processing="processing" :accessories="accessories" :packaging="packaging" :design="design" :totals="totals" :settings="settings" :materials="materials" :coatings="coatings" :product-qty="productQty" @close="showInvoice = false" @print="onInvoicePrint" />
     </Teleport>
 
     <Transition name="toast"><div v-if="toast.show" class="fixed top-6 left-1/2 -translate-x-1/2 z-[110] px-6 py-3 rounded-xl shadow-2xl flex items-center gap-3 border border-white/20 backdrop-blur-md transition-all bg-[#18181B]/90 text-white"><span class="font-bold text-xs uppercase tracking-wide">{{ toast.message }}</span></div></Transition>

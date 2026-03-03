@@ -11,10 +11,25 @@ const props = defineProps({
     packaging: Array,
     design: Array,
     totals: Object,
+    productQty: { type: Number, default: 1 },
     settings: Object,
     materials: Array,
     coatings: Array
 });
+
+const safeProductQty = computed(() => {
+    const n = Number(props.productQty);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
+});
+const toMoneyNum = (value) => {
+    if (typeof value === 'string') {
+        const normalized = value.replace(/\s+/g, '').replace(',', '.');
+        const parsed = Number(normalized);
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+};
 
 // Добавляем 'print' в список событий
 const emit = defineEmits(['close', 'print']);
@@ -180,6 +195,27 @@ const allItems = computed(() => {
     return list;
 });
 
+const subTotalOne = computed(() => {
+    return Math.round((allItems.value || []).reduce((sum, item) => sum + toMoneyNum(item?.total), 0));
+});
+
+const projectMarkupPct = computed(() => {
+    const n = toMoneyNum(props?.project?.markup);
+    return Math.max(0, n);
+});
+
+const projectDiscountPct = computed(() => {
+    const n = toMoneyNum(props?.project?.discount);
+    return Math.min(100, Math.max(0, n));
+});
+
+const markupRubOne = computed(() => Math.round(subTotalOne.value * (projectMarkupPct.value / 100)));
+const beforeDiscountOne = computed(() => subTotalOne.value + markupRubOne.value);
+const discountRubOne = computed(() => Math.round(beforeDiscountOne.value * (projectDiscountPct.value / 100)));
+const pricePerOne = computed(() => Math.max(0, Math.round(beforeDiscountOne.value - discountRubOne.value)));
+const totalForAll = computed(() => Math.round(pricePerOne.value * safeProductQty.value));
+const formatMoney = (value) => new Intl.NumberFormat('ru-RU').format(Math.max(0, Number(value) || 0));
+
 // ИЗМЕНЕНО: Сначала эмитим событие, потом печатаем
 const printInvoice = () => {
     emit('print'); // Trigger auto-save in parent
@@ -195,7 +231,7 @@ const printInvoice = () => {
 <template>
     <div v-if="show" class="invoice-modal fixed inset-0 z-[100] bg-black/85 backdrop-blur-sm flex flex-col items-center overflow-y-auto p-4 md:p-8 text-[#18181B]" @click.self="$emit('close')">
         
-        <div class="w-full max-w-[210mm] flex flex-col relative min-h-full">
+        <div class="invoice-root w-full max-w-[210mm] flex flex-col relative min-h-full">
             
             <div class="flex justify-end gap-3 mb-6 no-print shrink-0">
                 <button @click="printInvoice" class="bg-white text-black px-5 py-2.5 rounded-xl font-bold text-xs uppercase tracking-wider shadow-lg hover:bg-gray-100 transition-all flex items-center gap-2 active:scale-95">
@@ -207,26 +243,49 @@ const printInvoice = () => {
                 </button>
             </div>
 
-            <div class="bg-white w-full min-h-[297mm] shadow-2xl relative flex flex-col flex-1 animate-slide-up print:shadow-none print:w-full print:absolute print:inset-0 print:h-auto">
+            <div class="invoice-sheet bg-white w-full min-h-[297mm] shadow-2xl relative flex flex-col animate-slide-up print:shadow-none print:w-full print:h-auto">
                 <div class="p-12 pb-8 border-b border-gray-100 flex justify-between items-start">
-                    <div><h1 class="text-3xl font-black tracking-tight text-black mb-2">by Pechatny Dvor</h1></div>
+                    <div><h1 class="text-3xl font-black tracking-tight text-black mb-2">Печатный двор</h1></div>
                     <div class="text-right"><div class="text-2xl font-bold text-black mb-1">КП № {{ invoiceNumber }}</div><div class="text-sm text-gray-500 font-medium">от {{ currentDate }}</div></div>
                 </div>
                 <div class="px-12 py-8 flex justify-between gap-12">
                     <div class="flex-1"><div v-if="project.client || project.name"><h3 class="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-3">Заказчик</h3><div v-if="project.client" class="text-lg font-bold text-black mb-1">{{ project.client }}</div><div v-if="project.name" class="text-sm text-gray-500">{{ project.name }}</div></div></div>
                     <div class="text-right flex-1"><h3 class="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-3">Исполнитель</h3><div class="text-sm font-bold text-black">"Печатный двор"</div><div class="text-sm text-gray-500 mt-1">г. Биробиджан, ул. Советская 60А</div><div class="text-sm text-gray-500 font-medium mt-1">+7 (924) 742-07-76</div></div>
                 </div>
-                <div class="px-12 py-4 flex-1">
+                <div class="invoice-table-wrap px-12 py-4 flex-1">
                     <table class="w-full text-left border-collapse">
                         <thead><tr class="border-b-2 border-black"><th class="py-3 text-[10px] font-black uppercase tracking-wider text-black w-10">#</th><th class="py-3 text-[10px] font-black uppercase tracking-wider text-black">Наименование</th><th class="py-3 text-[10px] font-black uppercase tracking-wider text-black w-24">Тип</th><th class="py-3 text-[10px] font-black uppercase tracking-wider text-black text-center w-16">Кол-во</th><th class="py-3 text-[10px] font-black uppercase tracking-wider text-black text-right w-28">Сумма</th></tr></thead>
                         <tbody class="text-sm text-gray-700">
-                            <tr v-for="item in allItems" :key="item.id" class="border-b border-gray-100 last:border-0"><td class="py-4 text-gray-400 font-medium text-xs">{{ item.id }}</td><td class="py-4 font-bold text-black">{{ item.name }}<div class="text-xs text-gray-400 font-normal mt-0.5">{{ item.desc }}</div></td><td class="py-4 text-xs font-medium text-gray-500">{{ item.category }}</td><td class="py-4 text-center font-bold text-black">{{ item.qty }}</td><td class="py-4 text-right font-bold tabular-nums text-black">{{ Math.round(item.total).toLocaleString() }} ₽</td></tr>
+                            <tr v-for="item in allItems" :key="item.id" class="border-b border-gray-100 last:border-0"><td class="py-4 text-gray-400 font-medium text-xs">{{ item.id }}</td><td class="py-4 font-bold text-black">{{ item.name }}<div class="text-xs text-gray-400 font-normal mt-0.5">{{ item.desc }}</div></td><td class="py-4 text-xs font-medium text-gray-500">{{ item.category }}</td><td class="py-4 text-center font-bold text-black">{{ item.qty }}</td><td class="py-4 text-right font-bold tabular-nums text-black">{{ (Math.round(item.total ?? 0)).toLocaleString() }} ₽</td></tr>
                         </tbody>
                     </table>
                 </div>
-                <div class="bg-gray-50 p-12 mt-auto break-inside-avoid">
-                    <div class="flex justify-end mb-6"><div class="w-64 space-y-3"><div v-if="totals.markupRub > 0" class="flex justify-between text-sm text-gray-600"><span>Наценка ({{ project.markup }}%):</span><span class="font-bold">+{{ totals.markupRub.toLocaleString() }} ₽</span></div><div v-if="totals.discountRub > 0" class="flex justify-between text-sm text-gray-600"><span>Скидка ({{ project.discount }}%):</span><span class="font-bold">-{{ totals.discountRub.toLocaleString() }} ₽</span></div><div class="flex justify-between items-baseline pt-4 border-t border-gray-200"><span class="text-base font-black uppercase tracking-widest text-black">Итого:</span><span class="text-3xl font-black tracking-tighter text-black">{{ totals.total.toLocaleString() }} ₽</span></div></div></div>
-                    <div class="flex justify-between items-end pt-8 border-t border-gray-200"><div class="text-[10px] text-gray-400 max-w-xs leading-relaxed">Предложение действительно в течение 3 рабочих дней.<br>Не является публичной офертой.</div><div class="text-right"><div class="h-10 w-40 border-b border-black mb-2"></div><div class="text-[10px] text-gray-400 uppercase font-bold tracking-widest">Менеджер</div></div></div>
+                <div class="invoice-summary bg-white p-12 mt-auto">
+                    <div class="flex justify-end mb-6">
+                        <div class="w-64 space-y-3">
+                            <div v-if="markupRubOne > 0" class="flex justify-between text-sm text-gray-600">
+                                <span>Наценка ({{ project.markup }}%):</span>
+                                <span class="font-bold">+{{ (markupRubOne ?? 0).toLocaleString() }} ₽</span>
+                            </div>
+                            <div v-if="discountRubOne > 0" class="flex justify-between text-sm text-gray-600">
+                                <span>Скидка ({{ project.discount }}%):</span>
+                                <span class="font-bold">-{{ (discountRubOne ?? 0).toLocaleString() }} ₽</span>
+                            </div>
+                            <div class="flex justify-between items-center pt-2">
+                                <span class="text-xs font-bold text-gray-500">Количество изделий:</span>
+                                <span class="font-bold">{{ safeProductQty }} шт</span>
+                            </div>
+                            <div class="flex justify-between items-center pt-2">
+                                <span class="text-xs font-bold text-gray-500">Цена за 1 шт.:</span>
+                                <span class="invoice-money-line"><span class="invoice-money-number">{{ formatMoney(pricePerOne) }}</span><span class="invoice-money-currency">₽</span></span>
+                            </div>
+                            <div class="flex justify-between items-end pt-4 border-t border-gray-200 gap-4">
+                                <span class="text-base font-black uppercase tracking-widest text-black">Итого:</span>
+                                <span class="invoice-total-line"><span class="invoice-total-number">{{ formatMoney(totalForAll) }}</span><span class="invoice-total-currency">₽</span></span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="invoice-footer flex justify-between items-end pt-8 border-t border-gray-200"><div class="text-[10px] text-gray-400 max-w-xs leading-relaxed">Предложение действительно в течение 3 рабочих дней.<br>Не является публичной офертой.</div><div class="text-right"><div class="h-10 w-40 border-b border-black mb-2"></div><div class="text-[10px] text-gray-400 uppercase font-bold tracking-widest">Менеджер</div></div></div>
                 </div>
             </div>
             
@@ -235,27 +294,136 @@ const printInvoice = () => {
     </div>
 </template>
 
-<style scoped>
+<style>
 /* СТИЛИ ОСТАЮТСЯ БЕЗ ИЗМЕНЕНИЙ */
 .animate-slide-up { animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
 @keyframes slideUp { from { opacity: 0; transform: translateY(20px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 
+.invoice-money-line {
+    display: inline-flex;
+    align-items: baseline;
+    justify-content: flex-end;
+    gap: 0.28rem;
+    white-space: nowrap;
+    text-align: right;
+    font-weight: 800;
+    line-height: 1;
+}
+
+.invoice-total-line {
+    display: inline-flex;
+    align-items: baseline;
+    justify-content: flex-end;
+    gap: 0.35rem;
+    white-space: nowrap;
+    text-align: right;
+    font-weight: 800;
+    color: #000;
+    line-height: 1;
+    font-size: 2.45rem;
+    letter-spacing: -0.02em;
+}
+
+.invoice-money-number,
+.invoice-total-number {
+    font-variant-numeric: tabular-nums;
+}
+
+.invoice-money-currency {
+    font-size: 0.98em;
+}
+
+.invoice-total-currency {
+    font-size: 0.94em;
+}
+
 @media print {
-    body > *:not(.invoice-modal) { display: none !important; }
-    .invoice-modal { 
-        visibility: visible !important;
-        position: absolute !important; 
-        inset: 0 !important; 
-        background: white !important; 
-        padding: 0 !important; 
-        overflow: visible !important;
-        display: block !important;
-        z-index: 99999 !important;
+    html, body {
+        width: auto !important;
         height: auto !important;
+        overflow: visible !important;
+        background: #fff !important;
     }
-    .invoice-modal * { visibility: visible !important; }
-    .bg-white { box-shadow: none !important; width: 100% !important; max-width: none !important; height: auto !important; margin: 0 !important; }
-    .no-print { display: none !important; }
-    @page { margin: 0; size: auto; }
+
+    body > :not(.invoice-modal) {
+        display: none !important;
+    }
+
+    .invoice-modal {
+        position: static !important;
+        inset: auto !important;
+        display: block !important;
+        background: #fff !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: visible !important;
+        width: auto !important;
+        height: auto !important;
+        max-height: none !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+    }
+
+    .invoice-root {
+        width: 100% !important;
+        max-width: none !important;
+        min-height: 0 !important;
+        height: auto !important;
+        display: block !important;
+    }
+
+    .invoice-sheet {
+        box-shadow: none !important;
+        background: #fff !important;
+        width: 100% !important;
+        max-width: none !important;
+        height: auto !important;
+        min-height: 297mm !important;
+        margin: 0 !important;
+        position: static !important;
+        display: flex !important;
+        flex-direction: column !important;
+        overflow: visible !important;
+    }
+
+    .invoice-table-wrap {
+        flex: 1 1 auto !important;
+        overflow: visible !important;
+    }
+
+    .invoice-summary {
+        background: #fff !important;
+        margin-top: auto !important;
+        break-inside: avoid !important;
+        page-break-inside: avoid !important;
+    }
+
+    .invoice-footer {
+        break-inside: avoid !important;
+        page-break-inside: avoid !important;
+    }
+
+    .invoice-table-wrap table {
+        width: 100% !important;
+        border-collapse: collapse !important;
+    }
+
+    .invoice-table-wrap thead {
+        display: table-header-group;
+    }
+
+    .invoice-table-wrap tr {
+        break-inside: avoid;
+        page-break-inside: avoid;
+    }
+
+    .no-print {
+        display: none !important;
+    }
+
+    @page {
+        size: A4;
+        margin: 0;
+    }
 }
 </style>

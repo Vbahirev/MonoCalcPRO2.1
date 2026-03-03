@@ -311,6 +311,7 @@ watch(project, () => {
             client: finalClient,
             date: new Date().toISOString(),
             total: totals.value.total,
+            qty: qtySafe(project.value.qty),
             state: getFullState()
         };
 

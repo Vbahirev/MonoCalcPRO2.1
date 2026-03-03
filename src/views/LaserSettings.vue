@@ -290,7 +290,10 @@ const addItemToSection = (sectionId) => {
     impactLight();
     const ts = Date.now();
     let newItem = { id: `${sectionId}_${ts}`, name: '', price: 0 };
-    if (sectionId === 'materials') newItem = { ...newItem, type: 'plastic', sheetW: 0, sheetH: 0, sheetPrice: 0, speed: 20 };
+    if (sectionId === 'materials') {
+        const defaultType = orderedMaterialTypes.value[0] || 'plastic';
+        newItem = { ...newItem, type: defaultType, sheetW: 0, sheetH: 0, sheetPrice: 0, speed: 20 };
+    }
     if (sectionId === 'coatings') newItem = { ...newItem, allowedMaterialTypes: ['all'] };
     else if (sectionId === 'processing') newItem = { ...newItem, type: 'fixed', value: 0 };
     
